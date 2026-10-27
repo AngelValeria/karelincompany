@@ -1,1 +1,34 @@
-⌘V
+# Ozon-бот KARELIN: «почтальон» между сайтом на Beget и Telegram.
+# С Beget до Telegram не достучаться, поэтому раз в ~10 минут GitHub забирает с сайта новые отзывы
+# и вопросы Ozon и отправляет их в Telegram-бот. Черновики ответов пишет сам сайт.
+# Нужен один секрет репозитория: OZON_BOT_TOKEN (токен бота от @BotFather).
+name: Ozon-бот
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+jobs:
+  relay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Забрать новые отзывы с сайта и отправить в Telegram
+        env:
+          TG: ${{ secrets.OZON_BOT_TOKEN }}
+        run: |
+          set -u
+          if [ -z "$TG" ]; then echo "Нет секрета OZON_BOT_TOKEN"; exit 1; fi
+          code=$(curl -s -m 150 -o r.json -w '%{http_code}' -H "X-Bot-Token: $TG" "https://karelincompany.ru/ozon-bot.php?relay=1")
+          echo "Сайт ответил: $code"
+          if [ "$code" != "200" ]; then exit 1; fi
+          jq '{checked, new, errors}' r.json
+          jq -c '.hook' r.json > hook.json
+          curl -s -m 30 -H 'Content-Type: application/json' -d @hook.json "https://api.telegram.org/bot$TG/setWebhook" | jq -c '{ok, description}'
+          curl -s -m 30 "https://api.telegram.org/bot$TG/getWebhookInfo" | jq -c '{pending: .result.pending_update_count, last_error: .result.last_error_message}'
+          jq -c '.messages[]' r.json | while IFS= read -r m; do
+            printf '%s' "$m" > m.json
+            curl -s -m 30 -H 'Content-Type: application/json' -d @m.json "https://api.telegram.org/bot$TG/sendMessage" | jq -c '{ok, description}'
+          done
+          rm -f r.json hook.json m.json
