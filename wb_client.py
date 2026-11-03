@@ -90,7 +90,18 @@ class WBClient:
         return rows
 
     async def get_sales_analytics(self, date_from: str, date_to: str, sku_list: list[int], days: int) -> dict[int, float]:
-        await asyncio.sleep(61)       # у статистики WB лимит: 1 запрос в минуту
+        """Заказы за период по артикулам WB. Сначала статистика (лимит 1 запрос в минуту),
+        если она занята, то воронка продаж из аналитики (у неё отдельный лимит)."""
+        try:
+            await asyncio.sleep(61)       # у статистики WB лимит: 1 запрос в минуту
+            totals = await self._orders_from_statistics(date_from, date_to)
+        except OzonError as e:
+            logger.warning(f"WB заказы из статистики недоступны, беру аналитику: {e}")
+            self.notes.append("Продажи WB взяты из аналитики: статистика WB была занята")
+            totals = await self._orders_from_analytics(date_from, date_to, sku_list)
+        return {s: totals.get(s, 0.0) / days for s in set(sku_list)}
+
+    async def _orders_from_statistics(self, date_from: str, date_to: str) -> dict[int, float]:
         data = await self._get(STAT + "/api/v1/supplier/orders", {"dateFrom": date_from}) or []
         totals: dict[int, float] = {}
         end = datetime.fromisoformat(date_to).date()
@@ -105,8 +116,65 @@ class WBClient:
                 continue
             sku = int(o.get("nmId") or 0)
             totals[sku] = totals.get(sku, 0) + 1
-        logger.info(f"WB заказы: SKU {len(totals)}")
-        return {s: totals.get(s, 0.0) / days for s in set(sku_list)}
+        logger.info(f"WB заказы из статистики: SKU {len(totals)}")
+        return totals
+
+    async def _post(self, url: str, body: dict):
+        for attempt in range(1, 4):
+            try:
+                r = await self._http.post(url, json=body)
+            except httpx.HTTPError as e:
+                if attempt == 3:
+                    raise OzonError(f"Wildberries не отвечает ({type(e).__name__})") from e
+                await asyncio.sleep(10); continue
+            path = url.split(".ru")[-1]
+            logger.info(f"WB POST {path} → {r.status_code}")
+            if r.status_code == 429 or r.status_code >= 500:
+                if attempt == 3:
+                    raise OzonError(f"Wildberries {path}: ответ {r.status_code}")
+                await asyncio.sleep(min(float(r.headers.get("X-Ratelimit-Retry") or 25), 70)); continue
+            if r.status_code >= 400:
+                raise OzonError(f"Wildberries {path}: ошибка {r.status_code}. {r.text[:200]}")
+            return r.json()
+        raise OzonError("Wildberries: не удалось получить ответ")
+
+    async def _orders_from_analytics(self, date_from: str, date_to: str, sku_list: list[int]) -> dict[int, float]:
+        ids = [int(s) for s in sku_list if s][:1000]
+        errors = []
+        # новый метод воронки продаж
+        try:
+            data = await self._post(ANALYTICS + "/api/analytics/v3/sales-funnel/products",
+                                    {"selectedPeriod": {"start": date_from, "end": date_to}, "nmIds": ids, "limit": 1000, "offset": 0})
+            totals = {}
+            for p in ((data or {}).get("data") or {}).get("products") or []:
+                nm = int(((p.get("product") or {}).get("nmId")) or 0)
+                sel = ((p.get("statistic") or {}).get("selected")) or {}
+                totals[nm] = float(sel.get("orderCount") or sel.get("ordersCount") or 0)
+            if totals:
+                logger.info(f"WB заказы из воронки v3: SKU {len(totals)}")
+                return totals
+        except OzonError as e:
+            errors.append(str(e)[:150])
+        # прежний метод отчёта по карточкам
+        try:
+            totals, page = {}, 1
+            while page <= 10:
+                data = await self._post(ANALYTICS + "/api/v2/nm-report/detail", {
+                    "nmIDs": ids, "period": {"begin": f"{date_from} 00:00:00", "end": f"{date_to} 23:59:59"},
+                    "timezone": "Europe/Moscow", "page": page})
+                d = (data or {}).get("data") or {}
+                for c in d.get("cards") or []:
+                    sel = ((c.get("statistics") or {}).get("selectedPeriod")) or {}
+                    totals[int(c.get("nmID") or 0)] = float(sel.get("ordersCount") or 0)
+                if not d.get("isNextPage"):
+                    break
+                page += 1
+                await asyncio.sleep(21)
+            logger.info(f"WB заказы из отчёта по карточкам: SKU {len(totals)}")
+            return totals
+        except OzonError as e:
+            errors.append(str(e)[:150])
+        raise OzonError("Продажи WB не получены ни из статистики, ни из аналитики: " + " | ".join(errors))
 
     async def get_fbo_supply_limits(self) -> list[dict]:
         return []
