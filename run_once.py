@@ -45,10 +45,21 @@ async def run_check(analyzer: StockAnalyzer, st: dict) -> tuple[AnalysisResult, 
     return res, text
 
 
+DIAG: list[str] = []          # понятный отчёт на странице запуска GitHub (без секретов)
+
+
+def write_summary():
+    path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if path and DIAG:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write("## Агент остатков: что произошло\n\n" + "\n".join("- " + d for d in DIAG) + "\n")
+
+
 async def main() -> int:
     missing = settings.check()
     if missing:
         logger.error("Не заполнены секреты: " + ", ".join(missing))
+        DIAG.append("❌ Не заполнены секреты: " + ", ".join(missing)); write_summary()
         return 1
     st = load_state()
     tg = Telegram(settings.telegram_bot_token)
@@ -57,9 +68,17 @@ async def main() -> int:
     chat = settings.telegram_chat_id or st.get("chat_id")
     force_check = os.environ.get("FORCE_CHECK") == "1"
     try:
+        me = await tg.call("getMe")
+        if me.get("ok"):
+            DIAG.append("✅ Telegram: токен работает, бот @" + str((me.get("result") or {}).get("username", "")))
+        else:
+            DIAG.append("❌ Telegram: токен не подходит (" + str(me.get("description", "нет ответа")) + "). Обновите секрет STOCK_BOT_TOKEN новым токеном от BotFather")
+            return 0
         # 1. команды
         commands = []
-        for u in await tg.updates(int(st.get("offset", 0))):
+        ups = await tg.updates(int(st.get("offset", 0)))
+        DIAG.append(f"Новых сообщений боту: {len(ups)}")
+        for u in ups:
             st["offset"] = u["update_id"] + 1
             m = u.get("message") or {}
             cid, text = (m.get("chat") or {}).get("id"), (m.get("text") or "").strip().split("@")[0].lower()
@@ -74,7 +93,9 @@ async def main() -> int:
             commands.append(text)
         if not chat:
             logger.info("чат ещё не привязан: напишите боту /start")
+            DIAG.append("⚠️ Чат не привязан: напишите боту /start и запустите ещё раз")
             return 0
+        DIAG.append("✅ Чат привязан, отчёты будут приходить")
         for c in commands:
             if c.startswith("/start") or c.startswith("/help"):
                 await tg.send(chat, HELP)
@@ -93,6 +114,7 @@ async def main() -> int:
         summary_due = now_msk.hour >= settings.daily_summary_hour_msk and st.get("summary_day") != today
         if force_check or due or summary_due:
             res, text = await run_check(analyzer, st)
+            DIAG.append(f"✅ Ozon ответил: товаров {len(res.all_items)}, мало остатка {len(res.low_stock_items)}" + ("; " + "; ".join(res.notes) if res.notes else ""))
             low_key = ",".join(str(x.sku) for x in res.low_stock_items)
             if force_check:
                 await tg.send(chat, text)
@@ -108,10 +130,12 @@ async def main() -> int:
         return 0
     except OzonError as e:
         logger.error(str(e))
+        DIAG.append("❌ Ozon: " + str(e)[:300])
         if chat:
             await tg.send(chat, f"⚠️ Не получилось проверить остатки.\n{e}")
         return 0
     finally:
+        write_summary()
         save_state(st)
         await client.close()
         await tg.close()
