@@ -20,7 +20,7 @@ concurrency:
 jobs:
   agent:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -41,6 +41,7 @@ jobs:
         env:
           OZON_CLIENT_ID: ${{ secrets.OZON_CLIENT_ID }}
           OZON_API_KEY: ${{ secrets.OZON_API_KEY }}
+          WB_API_KEY: ${{ secrets.WB_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.STOCK_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.STOCK_CHAT_ID }}
           FORCE_CHECK: ${{ github.event_name == 'workflow_dispatch' && inputs.check && '1' || '0' }}
@@ -50,4 +51,3 @@ jobs:
         with:
           path: state
           key: stock-state-${{ github.run_id }}
-
