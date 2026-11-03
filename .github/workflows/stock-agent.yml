@@ -1,0 +1,53 @@
+# Агент остатков Ozon KARELIN: раз в ~10 минут забирает команды из Telegram,
+# каждые 3 часа проверяет остатки и пишет, если товара осталось меньше чем на 5 дней. Утром присылает сводку.
+# Секреты репозитория: OZON_CLIENT_ID, OZON_API_KEY, STOCK_BOT_TOKEN (токен отдельного бота), по желанию STOCK_CHAT_ID.
+name: Агент остатков Ozon
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+    inputs:
+      check:
+        description: 'Проверить остатки прямо сейчас'
+        type: boolean
+        default: true
+
+concurrency:
+  group: stock-agent
+  cancel-in-progress: false
+
+jobs:
+  agent:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - run: pip install -q -r requirements.txt
+      - name: Тесты (только при ручном запуске)
+        if: github.event_name != 'schedule'
+        run: pytest -q test_mock.py -k "not real_api"
+      - uses: actions/cache/restore@v4
+        with:
+          path: state
+          key: stock-state-${{ github.run_id }}
+          restore-keys: stock-state-
+      - name: Запуск агента
+        env:
+          OZON_CLIENT_ID: ${{ secrets.OZON_CLIENT_ID }}
+          OZON_API_KEY: ${{ secrets.OZON_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.STOCK_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.STOCK_CHAT_ID }}
+          FORCE_CHECK: ${{ github.event_name == 'workflow_dispatch' && inputs.check && '1' || '0' }}
+        run: python run_once.py
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: state
+          key: stock-state-${{ github.run_id }}
+
