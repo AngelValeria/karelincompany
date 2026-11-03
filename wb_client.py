@@ -23,22 +23,25 @@ class WBClient:
         await self._http.aclose()
 
     async def _get(self, url: str, params: dict | None = None):
-        delay = 5.0
-        for attempt in range(1, 5):
+        delay = 20.0
+        tries = 5
+        for attempt in range(1, tries + 1):
             try:
                 r = await self._http.get(url, params=params)
             except httpx.HTTPError as e:
                 logger.warning(f"WB {url.split('/api')[1]}: сеть, попытка {attempt}: {type(e).__name__}")
-                if attempt == 4:
+                if attempt == tries:
                     raise OzonError(f"Wildberries не отвечает ({type(e).__name__})") from e
                 await asyncio.sleep(delay); continue
             path = url.split(".ru")[-1]
             logger.info(f"WB GET {path} → {r.status_code}")
             if r.status_code == 429 or r.status_code >= 500:
-                if attempt == 4:
-                    raise OzonError(f"Wildberries {path}: ответ {r.status_code} после нескольких попыток")
                 wait = float(r.headers.get("X-Ratelimit-Retry") or r.headers.get("Retry-After") or delay)
-                await asyncio.sleep(min(max(wait, 1), 65)); delay *= 2; continue
+                if attempt == tries:
+                    hint = " WB ограничивает частоту запросов: возможно, кабинет WB одновременно использует другой сервис" if r.status_code == 429 else ""
+                    raise OzonError(f"Wildberries {path}: ответ {r.status_code} после {tries} попыток.{hint}")
+                logger.warning(f"WB {path}: {r.status_code}, жду {min(max(wait, 5), 90):.0f} с")
+                await asyncio.sleep(min(max(wait, 5), 90)); delay = min(delay * 1.5, 90); continue
             if r.status_code in (401, 403):
                 raise OzonError(f"Wildberries {path}: нет доступа ({r.status_code}). Проверьте токен WB и категории «Статистика» и «Аналитика». {r.text[:200]}")
             if r.status_code >= 400:
@@ -57,8 +60,11 @@ class WBClient:
             return rows
         except OzonError as e:
             logger.warning(f"WB остатки через статистику недоступны, беру отчёт аналитики: {e}")
-            self.notes.append("Остатки WB взяты из отчёта аналитики")
-            return await self._stocks_report()
+            self.notes.append("Остатки WB взяты из отчёта аналитики, потому что статистика ответила: " + str(e)[:160])
+            try:
+                return await self._stocks_report()
+            except OzonError as e2:
+                raise OzonError(f"Остатки WB не получены. Статистика: {str(e)[:200]} | Отчёт аналитики: {str(e2)[:200]}") from e2
 
     async def _stocks_report(self) -> list[dict]:
         task = await self._get(ANALYTICS + "/api/v1/warehouse_remains", {"groupByNm": "true", "groupByBrand": "false"})
