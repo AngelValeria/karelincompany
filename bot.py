@@ -11,9 +11,10 @@ from warehouse_advisor import SupplyPlan
 
 MSK = timezone(timedelta(hours=3))
 LINE = "━━━━━━━━━━━━━━━━━━━━"
-HELP = ("Я слежу за остатками KARELIN на складах Ozon.\n\n"
+HELP = ("Я слежу за остатками KARELIN на складах Ozon и Wildberries.\n\n"
         "/check — проверить остатки сейчас\n"
         "/status — показать последнюю проверку\n"
+        "/warehouses — где сейчас бесплатная приёмка на WB\n"
         "/help — эта справка\n\n"
         "Сама я проверяю остатки каждые 3 часа и пишу, если какого-то товара осталось меньше чем на 5 дней. "
         "Утром присылаю сводку. Отвечаю на команды с задержкой до 10 минут.")
@@ -44,7 +45,7 @@ def format_report(res: AnalysisResult, plans: list[SupplyPlan], threshold: float
             for r in plan.recommendations:
                 lim = "нет данных" if r.free_limit is None else f"{r.free_limit} шт."
                 after = "—" if math.isinf(r.days_after_supply) else f"{r.days_after_supply:.0f} дн."
-                out += [f"  • {r.warehouse_name}: {r.units_to_send} шт.", f"    └ Свободно: {lim} | После поставки: {after}"]
+                out += [f"  • {r.warehouse_name}: {r.units_to_send} шт.", f"    └ {r.note}" if r.note else f"    └ Свободно: {lim} | После поставки: {after}"]
         if plan.limit_shortage > 0:
             out.append(f"⚠️ Не хватает мест: {plan.limit_shortage} шт.")
         elif plan.comment:

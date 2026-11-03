@@ -78,3 +78,19 @@ def test_real_api():
         finally:
             await c.close()
     asyncio.run(go())
+
+
+def test_wb_advisor_free_first_and_closed_excluded():
+    from datetime import datetime, timedelta, timezone
+    from warehouse_advisor import build_wb_plans
+    d = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+    coefs = [{"warehouseName": "Коледино", "coefficient": 0, "date": d, "boxTypeID": 2},
+             {"warehouseName": "Электросталь", "coefficient": 1.5, "date": d, "boxTypeID": 2},
+             {"warehouseName": "Казань", "coefficient": 0, "date": d, "boxTypeID": 2},
+             {"warehouseName": "Белая Дача", "coefficient": -1, "date": d, "boxTypeID": 2}]
+    res = build_items(ROWS, SALES, 5, 14)
+    plans = build_wb_plans(res, coefs)
+    names = {r.warehouse_name for p in plans for r in p.recommendations}
+    assert "Белая Дача" not in names and names <= {"Коледино", "Казань"}
+    for p in plans:
+        assert sum(r.units_to_send for r in p.recommendations) == p.product.optimal_batch

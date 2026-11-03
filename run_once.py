@@ -16,7 +16,8 @@ from analytics import AnalysisResult, StockAnalyzer
 from bot import HELP, MSK, Telegram, format_report
 from config import settings
 from ozon_client import OzonClient, OzonError
-from warehouse_advisor import WarehouseAdvisor
+from warehouse_advisor import WarehouseAdvisor, acceptance_text, build_wb_plans
+from wb_client import WBClient
 
 STATE = os.path.join(settings.state_dir, "state.json")
 
@@ -35,14 +36,28 @@ def save_state(st: dict):
         json.dump(st, f, ensure_ascii=False)
 
 
-async def run_check(analyzer: StockAnalyzer, st: dict) -> tuple[AnalysisResult, str]:
-    res = await analyzer.analyze(force=True)
-    plans = WarehouseAdvisor().build_supply_plans(res, await analyzer.client.get_fbo_supply_limits())
-    text = format_report(res, plans, settings.low_stock_days_threshold, settings.optimal_supply_days)
+async def run_check(markets: list, st: dict) -> tuple[list, str]:
+    """Проверяет каждый маркетплейс отдельно: ошибка одного не мешает другому."""
+    lows, parts = [], []
+    for name, analyzer in markets:
+        try:
+            res = await analyzer.analyze(force=True)
+            if name == "Wildberries":
+                plans = build_wb_plans(res, await analyzer.client.get_acceptance_coefficients())
+                res.notes = list(dict.fromkeys(res.notes + analyzer.client.notes))
+            else:
+                plans = WarehouseAdvisor().build_supply_plans(res, await analyzer.client.get_fbo_supply_limits())
+            parts.append(format_report(res, plans, settings.low_stock_days_threshold, settings.optimal_supply_days, title=("🟦 OZON" if name == "Ozon" else "🟪 WILDBERRIES")))
+            lows += [f"{name}:{x.sku}" for x in res.low_stock_items]
+            DIAG.append(f"✅ {name} ответил: товаров {len(res.all_items)}, мало остатка {len(res.low_stock_items)}" + ("; " + "; ".join(res.notes) if res.notes else ""))
+        except OzonError as e:
+            logger.error(f"{name}: {e}")
+            DIAG.append(f"❌ {name}: " + str(e)[:300])
+            parts.append(("🟦 OZON" if name == "Ozon" else "🟪 WILDBERRIES") + f"\n⚠️ Не получилось проверить остатки.\n{e}")
+    text = ("\n\n" + "═" * 20 + "\n\n").join(parts)
     st["last_check"] = time.time()
-    st["last_result"] = res.to_dict()
     st["last_text"] = text
-    return res, text
+    return lows, text
 
 
 DIAG: list[str] = []          # понятный отчёт на странице запуска GitHub (без секретов)
@@ -65,6 +80,12 @@ async def main() -> int:
     tg = Telegram(settings.telegram_bot_token)
     client = OzonClient(settings.ozon_client_id, settings.ozon_api_key)
     analyzer = StockAnalyzer(client, settings.low_stock_days_threshold, settings.optimal_supply_days, settings.sales_period_days)
+    markets = [("Ozon", analyzer)]
+    wb = WBClient(settings.wb_api_key) if settings.wb_api_key.strip() else None
+    if wb:
+        markets.append(("Wildberries", StockAnalyzer(wb, settings.low_stock_days_threshold, settings.optimal_supply_days, settings.sales_period_days)))
+    else:
+        DIAG.append("ℹ️ Wildberries не проверяю: нет секрета WB_API_KEY")
     chat = settings.telegram_chat_id or st.get("chat_id")
     force_check = os.environ.get("FORCE_CHECK") == "1"
     try:
@@ -106,6 +127,11 @@ async def main() -> int:
                     await tg.send(chat, "Проверок ещё не было. Напишите /check")
             elif c.startswith("/check"):
                 force_check = True
+            elif c.startswith("/warehouses"):
+                if wb:
+                    await tg.send(chat, acceptance_text(await wb.get_acceptance_coefficients()))
+                else:
+                    await tg.send(chat, "Wildberries ещё не подключён: нет ключа WB_API_KEY")
 
         # 2. плановая проверка и утренняя сводка
         now_msk = datetime.now(MSK)
@@ -113,17 +139,18 @@ async def main() -> int:
         due = time.time() - float(st.get("last_check", 0)) >= settings.check_interval_hours * 3600
         summary_due = now_msk.hour >= settings.daily_summary_hour_msk and st.get("summary_day") != today
         if force_check or due or summary_due:
-            res, text = await run_check(analyzer, st)
-            DIAG.append(f"✅ Ozon ответил: товаров {len(res.all_items)}, мало остатка {len(res.low_stock_items)}" + ("; " + "; ".join(res.notes) if res.notes else ""))
-            low_key = ",".join(str(x.sku) for x in res.low_stock_items)
+            if force_check and wb:
+                await tg.send(chat, "⏳ Проверяю Ozon и Wildberries, это займёт 2–3 минуты")
+            lows, text = await run_check(markets, st)
+            low_key = ",".join(lows)
             if force_check:
                 await tg.send(chat, text)
             elif summary_due:
                 await tg.send(chat, "☀️ Утренняя сводка\n\n" + text)
                 st["summary_day"] = today
-            elif res.low_stock_items and (low_key != st.get("last_low") or st.get("last_low_day") != today):
+            elif lows and (low_key != st.get("last_low") or st.get("last_low_day") != today):
                 await tg.send(chat, text)          # тревога: только если список изменился или сегодня ещё не писали
-            if res.low_stock_items:
+            if lows:
                 st["last_low"], st["last_low_day"] = low_key, today
             else:
                 st["last_low"] = ""
@@ -138,6 +165,8 @@ async def main() -> int:
         write_summary()
         save_state(st)
         await client.close()
+        if wb:
+            await wb.close()
         await tg.close()
 
 

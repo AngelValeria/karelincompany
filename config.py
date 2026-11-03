@@ -8,6 +8,7 @@ class Settings(BaseSettings):
 
     ozon_client_id: str = Field("", alias="OZON_CLIENT_ID")
     ozon_api_key: str = Field("", alias="OZON_API_KEY")
+    wb_api_key: str = Field("", alias="WB_API_KEY")       # если пусто, Wildberries не проверяем
     telegram_bot_token: str = Field("", alias="TELEGRAM_BOT_TOKEN")
     telegram_chat_id: str = Field("", alias="TELEGRAM_CHAT_ID")   # можно не заполнять: бот запомнит того, кто первым напишет /start
     check_interval_hours: float = Field(3, alias="CHECK_INTERVAL_HOURS")
